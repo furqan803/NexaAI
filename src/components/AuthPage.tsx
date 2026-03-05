@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { cn } from "@/utils/cn";
+import { supabase } from "../../lib/supabaseClient";
 
 interface AuthPageProps {
   onAuth: (user: { name: string; email: string }) => void;
@@ -29,38 +30,41 @@ export function AuthPage({ onAuth }: AuthPageProps) {
     setError("");
     setLoading(true);
 
-    // Simulate auth (localStorage-based)
-    await new Promise((r) => setTimeout(r, 900));
+    try {
+      if (mode === "signup") {
+        const { error: signUpError } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              full_name: name.trim(),
+            },
+          },
+        });
 
-    if (mode === "signup") {
-      const users = JSON.parse(localStorage.getItem("aihub_users") || "[]");
-      const exists = users.find((u: { email: string }) => u.email === email.toLowerCase());
-      if (exists) {
-        setError("An account with this email already exists. Please log in.");
-        setLoading(false);
-        return;
+        if (signUpError) throw signUpError;
+
+        alert("Check your email for verification");
+      } else {
+        const { data, error: signInError } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+
+        if (signInError) throw signInError;
+
+        if (data.user) {
+          onAuth({
+            name: data.user.user_metadata?.full_name || data.user.email?.split('@')[0] || "User",
+            email: data.user.email || ""
+          });
+        }
       }
-      const newUser = { name: name.trim(), email: email.toLowerCase(), password };
-      users.push(newUser);
-      localStorage.setItem("aihub_users", JSON.stringify(users));
-      localStorage.setItem("aihub_session", JSON.stringify({ name: newUser.name, email: newUser.email }));
-      onAuth({ name: newUser.name, email: newUser.email });
-    } else {
-      const users = JSON.parse(localStorage.getItem("aihub_users") || "[]");
-      const found = users.find(
-        (u: { email: string; password: string }) =>
-          u.email === email.toLowerCase() && u.password === password
-      );
-      if (!found) {
-        setError("Incorrect email or password. Please try again.");
-        setLoading(false);
-        return;
-      }
-      localStorage.setItem("aihub_session", JSON.stringify({ name: found.name, email: found.email }));
-      onAuth({ name: found.name, email: found.email });
+    } catch (err: any) {
+      setError(err.message || "An error occurred during authentication.");
+    } finally {
+      setLoading(false);
     }
-
-    setLoading(false);
   };
 
   return (
@@ -80,7 +84,7 @@ export function AuthPage({ onAuth }: AuthPageProps) {
               <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
             </svg>
           </div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">AI Hub</h1>
+          <h1 className="text-2xl font-bold text-white tracking-tight">NexaAI</h1>
           <p className="text-white/35 text-sm mt-1">Your intelligent AI workspace</p>
         </div>
 
@@ -215,7 +219,7 @@ export function AuthPage({ onAuth }: AuthPageProps) {
                   {mode === "login" ? "Signing In..." : "Creating Account..."}
                 </>
               ) : (
-                mode === "login" ? "Sign In to AI Hub →" : "Create My Account →"
+                mode === "login" ? "Sign In to NexaAI →" : "Create My Account →"
               )}
             </button>
           </form>

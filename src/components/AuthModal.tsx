@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { cn } from "@/utils/cn";
+import { supabase } from "../../lib/supabaseClient";
 
 interface AuthModalProps {
     isOpen: boolean;
@@ -33,38 +34,43 @@ export function AuthModal({ isOpen, onClose, onAuth }: AuthModalProps) {
         setError("");
         setLoading(true);
 
-        await new Promise((r) => setTimeout(r, 900));
+        try {
+            if (mode === "signup") {
+                const { error: signUpError } = await supabase.auth.signUp({
+                    email,
+                    password,
+                    options: {
+                        data: {
+                            full_name: name.trim(),
+                        },
+                    },
+                });
 
-        if (mode === "signup") {
-            const users = JSON.parse(localStorage.getItem("aihub_users") || "[]");
-            const exists = users.find((u: { email: string }) => u.email === email.toLowerCase());
-            if (exists) {
-                setError("An account with this email already exists. Please log in.");
-                setLoading(false);
-                return;
+                if (signUpError) throw signUpError;
+
+                alert("Check your email for verification");
+                onClose();
+            } else {
+                const { data, error: signInError } = await supabase.auth.signInWithPassword({
+                    email,
+                    password,
+                });
+
+                if (signInError) throw signInError;
+
+                if (data.user) {
+                    onAuth({
+                        name: data.user.user_metadata?.full_name || data.user.email?.split('@')[0] || "User",
+                        email: data.user.email || ""
+                    });
+                }
+                onClose();
             }
-            const newUser = { name: name.trim(), email: email.toLowerCase(), password };
-            users.push(newUser);
-            localStorage.setItem("aihub_users", JSON.stringify(users));
-            localStorage.setItem("aihub_session", JSON.stringify({ name: newUser.name, email: newUser.email }));
-            onAuth({ name: newUser.name, email: newUser.email });
-        } else {
-            const users = JSON.parse(localStorage.getItem("aihub_users") || "[]");
-            const found = users.find(
-                (u: { email: string; password: string }) =>
-                    u.email === email.toLowerCase() && u.password === password
-            );
-            if (!found) {
-                setError("Incorrect email or password. Please try again.");
-                setLoading(false);
-                return;
-            }
-            localStorage.setItem("aihub_session", JSON.stringify({ name: found.name, email: found.email }));
-            onAuth({ name: found.name, email: found.email });
+        } catch (err: any) {
+            setError(err.message || "An error occurred during authentication.");
+        } finally {
+            setLoading(false);
         }
-
-        setLoading(false);
-        onClose();
     };
 
     return (

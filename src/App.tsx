@@ -5,6 +5,7 @@ import { InputArea } from "@/components/InputArea";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { AuthModal } from "@/components/AuthModal";
 import { askNowQuery, generatePosts, generateConversationTitle } from "@/services/aiService";
+import { supabase } from "../lib/supabaseClient";
 import { cn } from "@/utils/cn";
 import { Message, ModelType, Platform, Conversation } from "@/types";
 
@@ -21,14 +22,90 @@ interface AuthUser {
 
 export function App() {
   // ── Auth State ─────────────────────────────────────────────────────────────
-  const [user, setUser] = useState<AuthUser | null>(() => {
-    try {
-      const session = localStorage.getItem("aihub_session");
-      return session ? JSON.parse(session) : null;
-    } catch {
-      return null;
-    }
-  });
+  const [user, setUser] = useState<AuthUser | null>(null);
+
+  useEffect(() => {
+    // Initial session check
+    const checkUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        setUser({
+          name: user.user_metadata?.full_name || user.email?.split('@')[0] || "User",
+          email: user.email || ""
+        });
+      }
+    };
+    checkUser();
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        setUser({
+          name: session.user.user_metadata?.full_name || session.user.email?.split('@')[0] || "User",
+          email: session.user.email || ""
+        });
+      } else {
+        setUser(null);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // ── Fetch Conversations on Login ───────────────────────────────────────────
+  useEffect(() => {
+    const fetchHistory = async () => {
+      if (!user) return;
+
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      if (!authUser) return;
+
+      const { data: convos, error: convosError } = await supabase
+        .from('conversations')
+        .select('*')
+        .eq('user_id', authUser.id)
+        .order('created_at', { ascending: false });
+
+      if (convosError) {
+        console.error("Error fetching conversations:", convosError);
+        return;
+      }
+
+      if (convos && convos.length > 0) {
+        const { data: msgs, error: msgsError } = await supabase
+          .from('messages')
+          .select('*')
+          .eq('user_id', authUser.id)
+          .order('timestamp', { ascending: true });
+
+        if (msgsError) {
+          console.error("Error fetching messages:", msgsError);
+          return;
+        }
+
+        const formattedConversations: Conversation[] = convos.map(c => ({
+          id: c.id,
+          title: c.title,
+          createdAt: new Date(c.created_at),
+          messages: (msgs || [])
+            .filter(m => m.conversation_id === c.id)
+            .map(m => ({
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              model: m.model as ModelType,
+              timestamp: new Date(m.timestamp),
+              platforms: m.platforms,
+              posts: m.posts,
+            }))
+        }));
+
+        setConversations(formattedConversations);
+      }
+    };
+
+    fetchHistory();
+  }, [user]);
 
   // ── App State ──────────────────────────────────────────────────────────────
   const [activeModel, setActiveModel] = useState<ModelType>("asknow");
@@ -64,8 +141,8 @@ export function App() {
     setUser(authUser);
   }, []);
 
-  const handleLogout = useCallback(() => {
-    localStorage.removeItem("aihub_session");
+  const handleLogout = useCallback(async () => {
+    await supabase.auth.signOut();
     setUser(null);
     setConversations([]);
     setActiveConversationId(null);
@@ -98,17 +175,29 @@ export function App() {
   }, [conversations]);
 
   const handleDeleteConversation = useCallback(
-    (id: string) => {
+    async (id: string) => {
       setConversations((prev) => prev.filter((c) => c.id !== id));
       if (activeConversationId === id) setActiveConversationId(null);
+
+      // Sync with Supabase if logged in
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      if (authUser) {
+        await supabase.from('conversations').delete().eq('id', id);
+      }
     },
     [activeConversationId]
   );
 
-  const handleRenameConversation = useCallback((id: string, newTitle: string) => {
+  const handleRenameConversation = useCallback(async (id: string, newTitle: string) => {
     setConversations((prev) =>
       prev.map((c) => (c.id === id ? { ...c, title: newTitle } : c))
     );
+
+    // Sync with Supabase if logged in
+    const { data: { user: authUser } } = await supabase.auth.getUser();
+    if (authUser) {
+      await supabase.from('conversations').update({ title: newTitle }).eq('id', id);
+    }
   }, []);
 
   const handleShareConversation = useCallback((id: string) => {
@@ -192,12 +281,44 @@ export function App() {
       setIsLoading(true);
 
       try {
+        let currentConvoId = conversationId;
+        const { data: { user: authUser } } = await supabase.auth.getUser();
+
+        // 1. If it's a new conversation and user is logged in, create it in Supabase first
+        if (!activeConversationId && authUser) {
+          const { data: newConvoData, error: convoError } = await supabase
+            .from('conversations')
+            .insert([{ user_id: authUser.id, title: "New Chat" }])
+            .select()
+            .single();
+
+          if (convoError) throw convoError;
+          currentConvoId = newConvoData.id;
+          setActiveConversationId(currentConvoId);
+
+          // Update the local state with the actual Supabase ID
+          setConversations(prev => prev.map(c => c.id === conversationId ? { ...c, id: currentConvoId! } : c));
+        }
+
+        // 2. Save user message to Supabase
+        if (authUser && currentConvoId) {
+          await supabase.from("messages").insert([
+            {
+              conversation_id: currentConvoId,
+              user_id: authUser.id,
+              role: "user",
+              content,
+              model: activeModel,
+            }
+          ]);
+        }
+
         let assistantMessage: Message;
 
         if (activeModel === "asknow") {
           const answer = await askNowQuery(content);
           assistantMessage = {
-            id: loadingId,
+            id: generateId(),
             role: "assistant",
             content: answer,
             model: "asknow",
@@ -208,7 +329,7 @@ export function App() {
           const selectedPlatforms = platforms ?? (["facebook", "linkedin", "twitter"] as Platform[]);
           const posts = await generatePosts(content, selectedPlatforms);
           assistantMessage = {
-            id: loadingId,
+            id: generateId(),
             role: "assistant",
             content: "",
             model: "postgen",
@@ -219,9 +340,24 @@ export function App() {
           };
         }
 
+        // 3. Save assistant message to Supabase
+        if (authUser && currentConvoId) {
+          await supabase.from("messages").insert([
+            {
+              conversation_id: currentConvoId,
+              user_id: authUser.id,
+              role: assistantMessage.role,
+              content: assistantMessage.content,
+              model: assistantMessage.model,
+              platforms: assistantMessage.platforms,
+              posts: assistantMessage.posts,
+            }
+          ]);
+        }
+
         setConversations((prev) =>
           prev.map((c) =>
-            c.id === conversationId
+            c.id === currentConvoId
               ? {
                 ...c,
                 messages: c.messages.map((m) =>
@@ -231,13 +367,25 @@ export function App() {
               : c
           )
         );
+
+        // Update title if it's still "New Chat"
+        if (!activeConversationId) {
+          generateConversationTitle(content).then(async (title) => {
+            setConversations((prev) =>
+              prev.map((c) => (c.id === currentConvoId ? { ...c, title } : c))
+            );
+            if (authUser && currentConvoId) {
+              await supabase.from('conversations').update({ title }).eq('id', currentConvoId);
+            }
+          });
+        }
       } catch (err) {
         const errorText =
           err instanceof Error ? `❌ ${err.message}` : "❌ Something went wrong. Please try again.";
 
         setConversations((prev) =>
           prev.map((c) =>
-            c.id === conversationId
+            c.id === (activeConversationId || conversationId)
               ? {
                 ...c,
                 messages: c.messages.map((m) =>
@@ -253,7 +401,7 @@ export function App() {
         setIsLoading(false);
       }
     },
-    [isLoading, activeModel, activeConversationId]
+    [isLoading, activeModel, activeConversationId, user]
   );
 
   const handleExampleClick = useCallback(
